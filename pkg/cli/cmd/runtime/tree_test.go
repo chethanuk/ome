@@ -26,6 +26,7 @@ import (
 	omev1beta1 "sigs.k8s.io/ome/pkg/apis/ome/v1beta1"
 	"sigs.k8s.io/ome/pkg/cli/factory"
 	"sigs.k8s.io/ome/pkg/cli/paging"
+	"sigs.k8s.io/ome/pkg/cli/printers"
 	reportv1alpha1 "sigs.k8s.io/ome/pkg/cli/report/v1alpha1"
 	"sigs.k8s.io/ome/pkg/cli/runtimegraph"
 	omefake "sigs.k8s.io/ome/pkg/client/clientset/versioned/fake"
@@ -142,10 +143,55 @@ ClusterServingRuntime/kome-tree-b4d9098-root
                 `+"`"+`-- InferenceService/kome-tree-b4d9098-isvc-leaf-b
 Snapshot: Complete
 Collection: ClusterServingRuntime scope=Cluster status=Complete pages=1 items=3
-Collection: ServingRuntime scope=Namespace/ome-cli-tree-b4d9098 status=Complete pages=1 items=5
-Collection: InferenceService scope=Namespace/ome-cli-tree-b4d9098 status=Complete pages=1 items=5
+Collection: ServingRuntime scope=Namespace/ome-cli-tree-b4d9098
+  status=Complete pages=1 items=5
+Collection: InferenceService scope=Namespace/ome-cli-tree-b4d9098
+  status=Complete pages=1 items=5
 `, out.String())
 	assert.NotContains(t, out.String(), treeSecretCanary)
+}
+
+// TestTreeWideKeepsCompleteLegacyHumanOutput catches the wide path reusing
+// compact rows or clipping a complete identity that operators requested for
+// detailed human inspection.
+func TestTreeWideKeepsCompleteLegacyHumanOutput(t *testing.T) {
+	runtimeKind := "ClusterServingRuntime"
+	client := omefake.NewSimpleClientset(
+		clusterRuntimeWithExactName("root", ""),
+		&omev1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "team-a",
+				Name:      "uses-root-with-an-intentionally-long-but-valid-name-that-wide-must-not-clip",
+			},
+			Spec: omev1beta1.InferenceServiceSpec{Runtime: &omev1beta1.ServingRuntimeRef{
+				Name: "root", Kind: &runtimeKind,
+			}},
+		},
+	)
+	var out bytes.Buffer
+
+	errOut, err := executeTree(
+		t,
+		factory.Static{OME: client, NS: "team-a"},
+		&out,
+		"root", "--kind", "ClusterServingRuntime", "--output", "wide",
+	)
+
+	require.NoError(t, err)
+	assert.Empty(t, errOut)
+	assert.Equal(t, `RUNTIME TREE
+Target: ClusterServingRuntime/root
+Context: Cluster (resolution: Complete)
+Head: ClusterServingRuntime/root
+ClusterServingRuntime/root [selected]
+`+"`"+`-- InferenceService/team-a/uses-root-with-an-intentionally-long-but-valid-name-that-wide-must-not-clip
+Snapshot: Complete
+Collection: ClusterServingRuntime scope=Cluster status=Complete pages=1 items=1
+Collection: ServingRuntime scope=AllNamespaces status=Complete pages=1 items=0
+Collection: InferenceService scope=AllNamespaces status=Complete pages=1 items=1
+`, out.String())
+	assert.NotContains(t, out.String(), "...")
+	assert.Greater(t, printers.CellDisplayWidth(strings.Split(out.String(), "\n")[5]), 80)
 }
 
 // TestTreeExplainsHowToResolveKindCollisions catches an implicit target
@@ -198,7 +244,8 @@ func TestTreeReportsUnavailableInferenceServiceEvidence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, errOut)
 	assert.Contains(t, out.String(), "Snapshot: Partial\n")
-	assert.Contains(t, out.String(), "Collection: InferenceService scope=AllNamespaces status=Unavailable pages=0 items=0\n")
+	assert.Contains(t, out.String(),
+		"Collection: InferenceService scope=AllNamespaces\n  status=Unavailable pages=0 items=0\n")
 	assert.Contains(t, out.String(), "Warning: PartialData\n")
 	assert.Contains(t, out.String(), "Warning: SourceUnavailable\n")
 	assert.NotContains(t, out.String(), "private authorization detail")
@@ -324,7 +371,7 @@ func TestTreeReportsTruncatedInferenceServiceCollection(t *testing.T) {
 	assert.Contains(t, out.String(),
 		"Collection: ServingRuntime scope=AllNamespaces status=Complete pages=1 items=0\n")
 	assert.Contains(t, out.String(),
-		"Collection: InferenceService scope=AllNamespaces status=Truncated pages=1 items=1\n")
+		"Collection: InferenceService scope=AllNamespaces\n  status=Truncated pages=1 items=1\n")
 	assert.Contains(t, out.String(), "Warning: PartialData\n")
 	assert.Contains(t, out.String(), "Warning: Truncated\n")
 	assert.NotContains(t, out.String(), "Warning: SourceUnavailable\n")
@@ -420,10 +467,11 @@ func TestTreeDrainsFinitePagesForEveryCollection(t *testing.T) {
 	for _, collection := range []string{
 		"ClusterServingRuntime scope=Cluster",
 		"ServingRuntime scope=AllNamespaces",
-		"InferenceService scope=AllNamespaces",
 	} {
 		assert.Contains(t, out.String(), "Collection: "+collection+" status=Complete pages=2 items=2\n")
 	}
+	assert.Contains(t, out.String(),
+		"Collection: InferenceService scope=AllNamespaces status=Complete pages=2 items=2\n")
 	assert.NotContains(t, out.String(), "Warning:")
 }
 
@@ -984,22 +1032,28 @@ func treeServiceWithReference(
 // namespaced runtime stealing a cluster runtime's users (or vice versa).
 func TestTreeKeepsCollidingRuntimeUsersOnTheirExactIdentity(t *testing.T) {
 	tests := []struct {
-		kind       string
-		wantTarget string
-		wantUser   string
-		otherUser  string
+		kind          string
+		wantTarget    reportv1alpha1.RuntimeTreeIdentity
+		wantUserName  string
+		otherUserName string
 	}{
 		{
-			kind:       "ServingRuntime",
-			wantTarget: "Target: ServingRuntime/ome-cli-tree-b4d9098/kome-tree-b4d9098-collision",
-			wantUser:   "InferenceService/kome-tree-b4d9098-isvc-local-collision",
-			otherUser:  "isvc-cluster-collision",
+			kind: "ServingRuntime",
+			wantTarget: reportv1alpha1.RuntimeTreeIdentity{
+				Kind: reportv1alpha1.RuntimeKindServingRuntime, Namespace: treeFixtureNamespace,
+				Name: treeFixturePrefix + "collision",
+			},
+			wantUserName:  treeFixturePrefix + "isvc-local-collision",
+			otherUserName: treeFixturePrefix + "isvc-cluster-collision",
 		},
 		{
-			kind:       "ClusterServingRuntime",
-			wantTarget: "Target: ClusterServingRuntime/kome-tree-b4d9098-collision",
-			wantUser:   "InferenceService/ome-cli-tree-b4d9098/kome-tree-b4d9098-isvc-cluster-collision",
-			otherUser:  "isvc-local-collision",
+			kind: "ClusterServingRuntime",
+			wantTarget: reportv1alpha1.RuntimeTreeIdentity{
+				Kind: reportv1alpha1.RuntimeKindClusterServingRuntime,
+				Name: treeFixturePrefix + "collision",
+			},
+			wantUserName:  treeFixturePrefix + "isvc-cluster-collision",
+			otherUserName: treeFixturePrefix + "isvc-local-collision",
 		},
 	}
 	for _, test := range tests {
@@ -1011,14 +1065,24 @@ func TestTreeKeepsCollidingRuntimeUsersOnTheirExactIdentity(t *testing.T) {
 				t,
 				factory.Static{OME: client, NS: treeFixtureNamespace},
 				&out,
-				treeFixturePrefix+"collision", "--kind", test.kind,
+				treeFixturePrefix+"collision", "--kind", test.kind, "--output", "json",
 			)
 
 			require.NoError(t, err)
 			assert.Empty(t, errOut)
-			assert.Contains(t, out.String(), test.wantTarget)
-			assert.Contains(t, out.String(), test.wantUser)
-			assert.NotContains(t, out.String(), test.otherUser)
+			var got reportv1alpha1.RuntimeEnvelope[reportv1alpha1.RuntimeTreeContent]
+			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+			assert.Equal(t, test.wantTarget, got.Content.Target)
+			var dependentNames []string
+			for _, context := range got.Content.Contexts {
+				for _, path := range context.Paths {
+					for _, dependent := range path.Dependents {
+						dependentNames = append(dependentNames, dependent.Name)
+					}
+				}
+			}
+			assert.Contains(t, dependentNames, test.wantUserName)
+			assert.NotContains(t, dependentNames, test.otherUserName)
 		})
 	}
 }
@@ -1027,21 +1091,22 @@ func TestTreeKeepsCollidingRuntimeUsersOnTheirExactIdentity(t *testing.T) {
 // flattening or dropping missing-parent, cycle, and maximum-depth evidence.
 func TestTreePreservesInheritanceIssuePaths(t *testing.T) {
 	tests := []struct {
-		name    string
-		objects []k8sruntime.Object
-		target  string
-		want    []string
+		name           string
+		objects        []k8sruntime.Object
+		target         string
+		wantCode       reportv1alpha1.RuntimeTreeIssueCode
+		wantParentName string
+		wantPath       []string
 	}{
 		{
 			name: "missing parent",
 			objects: []k8sruntime.Object{
 				clusterRuntimeWithExactName("orphan", "missing"),
 			},
-			target: "orphan",
-			want: []string{
-				"Issue: ParentMissing subject=ClusterServingRuntime/orphan parent=missing",
-				"Issue path: ClusterServingRuntime/orphan",
-			},
+			target:         "orphan",
+			wantCode:       reportv1alpha1.RuntimeTreeIssueParentMissing,
+			wantParentName: "missing",
+			wantPath:       []string{"orphan"},
 		},
 		{
 			name: "cycle",
@@ -1049,11 +1114,10 @@ func TestTreePreservesInheritanceIssuePaths(t *testing.T) {
 				clusterRuntimeWithExactName("cycle-a", "cycle-b"),
 				clusterRuntimeWithExactName("cycle-b", "cycle-a"),
 			},
-			target: "cycle-a",
-			want: []string{
-				"Issue: CycleDetected subject=ClusterServingRuntime/cycle-a parent=cycle-a",
-				"Issue path: ClusterServingRuntime/cycle-a -> ClusterServingRuntime/cycle-b -> ClusterServingRuntime/cycle-a",
-			},
+			target:         "cycle-a",
+			wantCode:       reportv1alpha1.RuntimeTreeIssueCycleDetected,
+			wantParentName: "cycle-a",
+			wantPath:       []string{"cycle-a", "cycle-b", "cycle-a"},
 		},
 		{
 			name: "maximum depth",
@@ -1065,11 +1129,10 @@ func TestTreePreservesInheritanceIssuePaths(t *testing.T) {
 				clusterRuntimeWithExactName("depth-4", "depth-5"),
 				clusterRuntimeWithExactName("depth-5", ""),
 			},
-			target: "depth-0",
-			want: []string{
-				"Issue: MaxDepthExceeded subject=ClusterServingRuntime/depth-0 parent=depth-5",
-				"Issue path: ClusterServingRuntime/depth-0 -> ClusterServingRuntime/depth-1 -> ClusterServingRuntime/depth-2 -> ClusterServingRuntime/depth-3 -> ClusterServingRuntime/depth-4",
-			},
+			target:         "depth-0",
+			wantCode:       reportv1alpha1.RuntimeTreeIssueMaxDepthExceeded,
+			wantParentName: "depth-5",
+			wantPath:       []string{"depth-0", "depth-1", "depth-2", "depth-3", "depth-4"},
 		},
 	}
 	for _, test := range tests {
@@ -1079,14 +1142,30 @@ func TestTreePreservesInheritanceIssuePaths(t *testing.T) {
 				t,
 				factory.Static{OME: omefake.NewSimpleClientset(test.objects...), NS: treeFixtureNamespace},
 				&out,
-				test.target, "--kind", "ClusterServingRuntime",
+				test.target, "--kind", "ClusterServingRuntime", "--output", "json",
 			)
 
 			require.NoError(t, err)
 			assert.Empty(t, errOut)
-			for _, want := range test.want {
-				assert.Contains(t, out.String(), want)
+			var got reportv1alpha1.RuntimeEnvelope[reportv1alpha1.RuntimeTreeContent]
+			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+			var selectedIssue *reportv1alpha1.RuntimeTreeIssue
+			for _, context := range got.Content.Contexts {
+				for _, path := range context.Paths {
+					if path.Head == got.Content.Target {
+						selectedIssue = path.Issue
+					}
+				}
 			}
+			require.NotNil(t, selectedIssue)
+			assert.Equal(t, test.wantCode, selectedIssue.Code)
+			assert.Equal(t, test.target, selectedIssue.Subject.Name)
+			assert.Equal(t, test.wantParentName, selectedIssue.ParentName)
+			pathNames := make([]string, len(selectedIssue.Path))
+			for i := range selectedIssue.Path {
+				pathNames[i] = selectedIssue.Path[i].Name
+			}
+			assert.Equal(t, test.wantPath, pathNames)
 		})
 	}
 }
@@ -1100,8 +1179,8 @@ func TestTreeValidationPrecedesClientAcquisition(t *testing.T) {
 		{name: "zero arguments", wantError: "accepts 1 arg(s)"},
 		{name: "two arguments", args: []string{"one", "two"}, wantError: "accepts 1 arg(s)"},
 		{name: "invalid runtime name", args: []string{"Bad_Name"}, wantError: "runtime name"},
-		{name: "invalid output", args: []string{"runtime", "--output", "xml"}, wantError: "unsupported output format"},
-		{name: "invalid output first", args: []string{"Bad_Name", "--output", "xml"}, wantError: "unsupported output format"},
+		{name: "invalid output", args: []string{"runtime", "--output", "xml"}, wantError: `unsupported output format "xml" (supported: table, wide, json, yaml)`},
+		{name: "invalid output first", args: []string{"Bad_Name", "--output", "xml"}, wantError: `unsupported output format "xml" (supported: table, wide, json, yaml)`},
 		{name: "invalid kind", args: []string{"runtime", "--kind", "Pod"}, wantError: "unsupported runtime kind"},
 	}
 	for _, test := range tests {
@@ -1137,6 +1216,8 @@ func TestTreeHelpShowsCollisionSafeInvocations(t *testing.T) {
 		"kubectl ome runtime tree vllm-runtime",
 		"--kind ClusterServingRuntime",
 		"--kind ServingRuntime -n team-a -o json",
+		"Use -o wide for the complete unabridged tree",
+		"Output format: table, wide, json or yaml",
 		"explicitly reference each visible runtime head",
 		"inheritance is rendered only from complete runtime collections",
 		"InferenceService collection remains visible as partial dependency evidence",
@@ -1427,7 +1508,7 @@ func TestTreeHonorsCancellationBeforeListing(t *testing.T) {
 
 func TestTreePreservesOutputWriterFailures(t *testing.T) {
 	writerFailure := errors.New("tree writer sentinel")
-	for _, format := range []string{"table", "json", "yaml"} {
+	for _, format := range []string{"table", "wide", "json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			client := omefake.NewSimpleClientset(clusterRuntimeWithExactName("root", ""))
 			_, err := executeTree(

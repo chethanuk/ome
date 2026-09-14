@@ -133,7 +133,11 @@ func TestProjectKeepsSameContextMaxDepthPathsSeparate(t *testing.T) {
 		"        `-- ClusterServingRuntime/level-5\n"+
 		"            `-- ClusterServingRuntime/level-6\n"+
 		"Issue: MaxDepthExceeded subject=ClusterServingRuntime/level-6 parent=level-1\n"+
-		"Issue path: ClusterServingRuntime/level-6 -> ClusterServingRuntime/level-5 -> ClusterServingRuntime/level-4 -> ClusterServingRuntime/target -> ClusterServingRuntime/level-2\n"+
+		"Issue path: ClusterServingRuntime/level-6\n"+
+		"  -> ClusterServingRuntime/level-5\n"+
+		"  -> ClusterServingRuntime/level-4\n"+
+		"  -> ClusterServingRuntime/target\n"+
+		"  -> ClusterServingRuntime/level-2\n"+
 		"Snapshot: Complete\n"+
 		"Collection: ClusterServingRuntime scope=Cluster status=Complete pages=1 items=6\n"+
 		"Collection: ServingRuntime scope=AllNamespaces status=Complete pages=1 items=0\n"+
@@ -204,7 +208,8 @@ func TestProjectDerivesSnapshotContextCompletenessAndWarnings(t *testing.T) {
 		"`-- ServingRuntime/local-b\n"+
 		"Snapshot: Partial\n"+
 		"Collection: ClusterServingRuntime scope=Cluster status=Complete pages=1 items=2\n"+
-		"Collection: ServingRuntime scope=AllNamespaces status=Unavailable pages=1 items=2\n"+
+		"Collection: ServingRuntime scope=AllNamespaces\n"+
+		"  status=Unavailable pages=1 items=2\n"+
 		"Collection: InferenceService scope=AllNamespaces status=Complete pages=1 items=0\n"+
 		"Warning: PartialData\n"+
 		"Warning: SourceUnavailable\n",
