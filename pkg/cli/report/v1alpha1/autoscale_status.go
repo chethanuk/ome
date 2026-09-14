@@ -2,12 +2,15 @@ package v1alpha1
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"sigs.k8s.io/ome/pkg/cli/printers"
 	"sigs.k8s.io/ome/pkg/cli/report"
 )
 
@@ -260,6 +263,13 @@ func (r AutoscaleStatusReport) Canonical() AutoscaleStatusReport {
 
 func (r AutoscaleStatusReport) Table() report.Table { return r.Canonical().Content.Table() }
 
+// WideTable returns the complete legacy autoscaling table. The default table
+// is deliberately compact; operators can opt into this form when they need
+// full target identities, timestamps, condition names, and evidence columns.
+func (r AutoscaleStatusReport) WideTable() report.Table {
+	return r.Canonical().Content.WideTable()
+}
+
 func (c AutoscaleStatusContent) Canonical() AutoscaleStatusContent {
 	result := c
 	result.Components = make([]AutoscaleComponentStatus, len(c.Components))
@@ -284,6 +294,252 @@ func (c AutoscaleStatusContent) Canonical() AutoscaleStatusContent {
 }
 
 func (c AutoscaleStatusContent) Table() report.Table {
+	canonical := c.Canonical()
+	table := report.Table{Headers: []string{"FIELD", "SERVICE", "ENGINE", "DECODER", "ROUTER"}}
+	componentTypes := []RuntimeComponentType{
+		RuntimeComponentEngine,
+		RuntimeComponentDecoder,
+		RuntimeComponentRouter,
+	}
+	valuesByComponent := make(map[RuntimeComponentType]map[string][]string, len(componentTypes))
+	unknownComponents := 0
+	for _, component := range canonical.Components {
+		if autoscaleComponentRank(component.Type) >= len(componentTypes) {
+			unknownComponents++
+			continue
+		}
+		if valuesByComponent[component.Type] == nil {
+			valuesByComponent[component.Type] = make(map[string][]string)
+		}
+		for field, value := range compactAutoscaleComponentValues(component) {
+			valuesByComponent[component.Type][field] = append(
+				valuesByComponent[component.Type][field], value,
+			)
+		}
+	}
+
+	stateRow := []string{"STATE", compactAutoscaleCell([]string{string(canonical.Summary.State)})}
+	for _, componentType := range componentTypes {
+		stateRow = append(stateRow, compactAutoscaleCell(valuesByComponent[componentType]["STATE"]))
+	}
+	table.Rows = append(table.Rows, stateRow)
+
+	for _, field := range []string{
+		"CLASS",
+		"MANAGED-BY",
+		"SPEC-SOURCE",
+		"TARGET-KIND",
+		"TARGET-NAME",
+		"TARGET-EVIDENCE",
+		"CURRENT",
+		"DESIRED",
+		"REPLICA-EVIDENCE",
+		"LAST-SCALE",
+		"COND-EVIDENCE",
+		"ABLE-TO-SCALE",
+		"SCALING-ACTIVE",
+		"SCALING-LIMITED",
+		"READY",
+		"ACTIVE",
+		"FALLBACK",
+		"PAUSED",
+	} {
+		row := []string{field, "-"}
+		hasValue := false
+		for _, componentType := range componentTypes {
+			value := compactAutoscaleCell(valuesByComponent[componentType][field])
+			row = append(row, value)
+			if value != "-" {
+				hasValue = true
+			}
+		}
+		if hasValue {
+			table.Rows = append(table.Rows, row)
+		}
+	}
+	if unknownComponents > 0 {
+		table.Rows = append(table.Rows, []string{
+			"OTHER",
+			printers.BoundedCell(strconv.Itoa(unknownComponents)+" omitted", compactAutoscaleCellWidth),
+			"-", "-", "-",
+		})
+	}
+	if len(canonical.Issues) > 0 {
+		scopes := append([]RuntimeComponentType{""}, componentTypes...)
+		aliasesByScope := make([][]string, len(scopes))
+		issueRows := 0
+		for index, scope := range scopes {
+			aliasesByScope[index] = compactAutoscaleIssueAliases(scope, canonical.Issues)
+			issueRows = max(issueRows, len(aliasesByScope[index]))
+		}
+		// Keep one alias per scope and row. Joining aliases into one bounded
+		// cell would hide every issue after the first truncation point.
+		for issueIndex := range issueRows {
+			row := []string{"ISSUES"}
+			for _, aliases := range aliasesByScope {
+				alias := "-"
+				if issueIndex < len(aliases) {
+					alias = aliases[issueIndex]
+				}
+				row = append(row, alias)
+			}
+			table.Rows = append(table.Rows, row)
+		}
+	}
+	return table
+}
+
+const compactAutoscaleCellWidth = 13
+
+func compactAutoscaleComponentValues(component AutoscaleComponentStatus) map[string]string {
+	values := map[string]string{
+		"STATE":            string(component.State),
+		"CLASS":            string(component.Class),
+		"MANAGED-BY":       string(component.ManagedBy),
+		"SPEC-SOURCE":      string(component.SpecSource),
+		"TARGET-KIND":      compactAutoscaleTargetKind(component.Target),
+		"TARGET-NAME":      compactAutoscaleTargetName(component.Target),
+		"TARGET-EVIDENCE":  string(component.Target.State),
+		"CURRENT":          autoscaleInt32Cell(component.Replicas.CurrentReplicas),
+		"DESIRED":          autoscaleInt32Cell(component.Replicas.DesiredReplicas),
+		"REPLICA-EVIDENCE": string(component.Replicas.State),
+		"LAST-SCALE":       compactAutoscaleTimeCell(component.Replicas.LastScaleTime),
+		"COND-EVIDENCE":    string(component.Conditions.State),
+	}
+	for _, condition := range component.Conditions.Items {
+		field := compactAutoscaleConditionField(condition.Type)
+		if field == "" {
+			continue
+		}
+		if previous := values[field]; previous != "" {
+			values[field] = previous + "/" + string(condition.Status)
+			continue
+		}
+		values[field] = string(condition.Status)
+	}
+	return values
+}
+
+func compactAutoscaleTargetKind(target AutoscaleTarget) string {
+	if target.State != AutoscaleTargetReported {
+		return "-"
+	}
+	switch target.Kind {
+	case AutoscaleTargetInferenceReplica:
+		return "IR"
+	case AutoscaleTargetDeployment:
+		return "Deployment"
+	default:
+		return "Unknown"
+	}
+}
+
+func compactAutoscaleTargetName(target AutoscaleTarget) string {
+	if target.State != AutoscaleTargetReported {
+		return "-"
+	}
+	return printers.BoundedMiddleCell(target.Name, compactAutoscaleCellWidth)
+}
+
+func compactAutoscaleTimeCell(value *time.Time) string {
+	if value == nil {
+		return "-"
+	}
+	return value.UTC().Format("Jan02 15:04Z")
+}
+
+func compactAutoscaleConditionField(condition AutoscaleConditionType) string {
+	switch condition {
+	case AutoscaleConditionAbleToScale:
+		return "ABLE-TO-SCALE"
+	case AutoscaleConditionScalingActive:
+		return "SCALING-ACTIVE"
+	case AutoscaleConditionScalingLimited:
+		return "SCALING-LIMITED"
+	case AutoscaleConditionReady:
+		return "READY"
+	case AutoscaleConditionActive:
+		return "ACTIVE"
+	case AutoscaleConditionFallback:
+		return "FALLBACK"
+	case AutoscaleConditionPaused:
+		return "PAUSED"
+	default:
+		return ""
+	}
+}
+
+func compactAutoscaleCell(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	clean := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			clean = append(clean, value)
+		}
+	}
+	if len(clean) == 0 {
+		return "-"
+	}
+	return printers.BoundedCell(strings.Join(clean, ";"), compactAutoscaleCellWidth)
+}
+
+func compactAutoscaleIssueAliases(component RuntimeComponentType, issues []AutoscaleIssue) []string {
+	values := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if component == "" {
+			if issue.Component == "" || autoscaleComponentRank(issue.Component) >= 3 {
+				values = append(values, compactAutoscaleIssueAlias(issue.Code))
+			}
+			continue
+		}
+		if issue.Component == component {
+			values = append(values, compactAutoscaleIssueAlias(issue.Code))
+		}
+	}
+	return values
+}
+
+func compactAutoscaleIssueAlias(code AutoscaleIssueCode) string {
+	switch code {
+	case AutoscaleIssueUnknownComponentStatus:
+		return "UnknownComp"
+	case AutoscaleIssueAutoscalerNotReported:
+		return "NoAutoscaler"
+	case AutoscaleIssueScaleTargetNotReported:
+		return "NoTarget"
+	case AutoscaleIssueClassInvalid:
+		return "BadClass"
+	case AutoscaleIssueManagedByInvalid:
+		return "BadManager"
+	case AutoscaleIssueOwnershipMismatch:
+		return "OwnerMismatch"
+	case AutoscaleIssueSpecSourceInvalid:
+		return "BadSpecSource"
+	case AutoscaleIssueUnexpectedScalerEvidence:
+		return "UnexpectedEv"
+	case AutoscaleIssueReplicaEvidenceAmbiguous:
+		return "ReplicaAmbig"
+	case AutoscaleIssueReplicaEvidenceInvalid:
+		return "BadReplica"
+	case AutoscaleIssueScaleTargetInvalid:
+		return "BadTarget"
+	case AutoscaleIssueConditionInvalid:
+		return "BadCondition"
+	case AutoscaleIssueConditionConflict:
+		return "CondConflict"
+	default:
+		// Future values are outside the closed issue vocabulary. Avoid
+		// echoing an untrusted value while retaining a stable 40-bit identity.
+		digest := sha256.Sum256([]byte(code))
+		return "X#" + hex.EncodeToString(digest[:5])
+	}
+}
+
+// WideTable returns the deterministic complete autoscaling view that preceded
+// the compact component matrix.
+func (c AutoscaleStatusContent) WideTable() report.Table {
 	canonical := c.Canonical()
 	table := report.Table{Headers: []string{
 		"STATE", "COMPONENT", "COMPONENT-STATE", "CLASS", "MANAGED-BY", "SPEC-SOURCE",
