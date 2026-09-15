@@ -116,6 +116,85 @@ func TestResolveAcceleratorBaseUsesLeaderServingTemplate(t *testing.T) {
 	assert.Equal(t, []AcceleratorBaseRequest{{Name: "cpu", Quantity: "3"}}, got.Components[0].Requests)
 }
 
+// Resource inheritance follows the controller's top-level runner check even
+// when the selected serving template belongs to the leader.
+func TestResolveAcceleratorBaseLeaderInheritsRuntimeResources(t *testing.T) {
+	t.Run("engine", func(t *testing.T) {
+		isvc := acceleratorISVCFixture()
+		isvc.Spec.Engine = &v1beta1.EngineSpec{
+			Leader: &v1beta1.LeaderSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{
+				Name: "leader", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("3"),
+				}},
+			}}},
+		}
+		activeEngine := isvc.Spec.Engine.DeepCopy()
+		runtimeSpec := acceleratorRuntimeWithRunnerMemory("leader")
+		state := acceleratorRuntimeState(isvc, &ActiveConfiguration{
+			Origin: ConfigurationOriginLiveRuntime, RuntimeName: "runtime",
+			RuntimeKind: "ServingRuntime", RuntimeNamespace: "prod",
+			Consistency: RevisionConsistencyUnknown, spec: runtimeSpec,
+			components: []EffectiveComponent{{Type: v1beta1.EngineComponent, engine: activeEngine}},
+		})
+
+		got, err := ResolveAcceleratorBase(isvc, state)
+
+		require.NoError(t, err)
+		require.Len(t, got.Components, 1)
+		assert.Equal(t, []AcceleratorBaseRequest{
+			{Name: "cpu", Quantity: "3"}, {Name: "memory", Quantity: "64Gi"},
+		}, got.Components[0].Requests)
+
+		isvc.Spec.Engine.Runner = &v1beta1.RunnerSpec{Container: corev1.Container{
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("99"),
+			}},
+		}}
+		got, err = ResolveAcceleratorBase(isvc, state)
+		require.NoError(t, err)
+		require.Len(t, got.Components, 1)
+		assert.Equal(t, []AcceleratorBaseRequest{{Name: "cpu", Quantity: "3"}}, got.Components[0].Requests)
+	})
+
+	t.Run("decoder", func(t *testing.T) {
+		isvc := acceleratorISVCFixture()
+		isvc.Spec.Engine = nil
+		isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+			Leader: &v1beta1.LeaderSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{
+				Name: "leader", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("4"),
+				}},
+			}}},
+		}
+		activeDecoder := isvc.Spec.Decoder.DeepCopy()
+		runtimeSpec := acceleratorRuntimeWithRunnerMemory("leader")
+		state := acceleratorRuntimeState(isvc, &ActiveConfiguration{
+			Origin: ConfigurationOriginLiveRuntime, RuntimeName: "runtime",
+			RuntimeKind: "ServingRuntime", RuntimeNamespace: "prod",
+			Consistency: RevisionConsistencyUnknown, spec: runtimeSpec,
+			components: []EffectiveComponent{{Type: v1beta1.DecoderComponent, decoder: activeDecoder}},
+		})
+
+		got, err := ResolveAcceleratorBase(isvc, state)
+
+		require.NoError(t, err)
+		require.Len(t, got.Components, 1)
+		assert.Equal(t, []AcceleratorBaseRequest{
+			{Name: "cpu", Quantity: "4"}, {Name: "memory", Quantity: "64Gi"},
+		}, got.Components[0].Requests)
+
+		isvc.Spec.Decoder.Runner = &v1beta1.RunnerSpec{Container: corev1.Container{
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("99"),
+			}},
+		}}
+		got, err = ResolveAcceleratorBase(isvc, state)
+		require.NoError(t, err)
+		require.Len(t, got.Components, 1)
+		assert.Equal(t, []AcceleratorBaseRequest{{Name: "cpu", Quantity: "4"}}, got.Components[0].Requests)
+	})
+}
+
 func TestResolveAcceleratorBaseSupportsDecoderAndCanonicalizesRequests(t *testing.T) {
 	isvc := acceleratorISVCFixture()
 	isvc.Spec.Engine = nil
@@ -339,4 +418,14 @@ func acceleratorRuntimeState(isvc *v1beta1.InferenceService, active *ActiveConfi
 		}, Components: cloneEffectiveComponents(active.components)}
 	}
 	return state
+}
+
+func acceleratorRuntimeWithRunnerMemory(name string) *v1beta1.ServingRuntimeSpec {
+	return &v1beta1.ServingRuntimeSpec{
+		ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{Containers: []corev1.Container{{
+			Name: name, Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("64Gi"),
+			}},
+		}}},
+	}
 }

@@ -302,7 +302,14 @@ func (c AcceleratorExplainContent) Canonical() AcceleratorExplainContent {
 		result.Components[i] = component
 	}
 	sort.Slice(result.Components, func(i, j int) bool {
-		return acceleratorComponentRank(result.Components[i].Type) < acceleratorComponentRank(result.Components[j].Type)
+		left, right := result.Components[i], result.Components[j]
+		if acceleratorComponentRank(left.Type) != acceleratorComponentRank(right.Type) {
+			return acceleratorComponentRank(left.Type) < acceleratorComponentRank(right.Type)
+		}
+		if left.Type != right.Type {
+			return left.Type < right.Type
+		}
+		return acceleratorComponentCanonicalKey(left) < acceleratorComponentCanonicalKey(right)
 	})
 	result.Issues = append([]AcceleratorExplainIssue{}, c.Issues...)
 	sort.Slice(result.Issues, func(i, j int) bool {
@@ -505,6 +512,46 @@ func acceleratorComponentRank(component RuntimeComponentType) int {
 	default:
 		return 3
 	}
+}
+
+func acceleratorComponentCanonicalKey(component AcceleratorExplainComponent) string {
+	var key strings.Builder
+	appendValue := func(value string) {
+		key.WriteString(strconv.Itoa(len(value)))
+		key.WriteByte(':')
+		key.WriteString(value)
+	}
+	appendValue(string(component.Type))
+	appendValue(string(component.Intent.State))
+	appendValue(string(component.Intent.Policy))
+	appendValue(string(component.Intent.PolicySource))
+	appendValue(component.Intent.DeclaredClass)
+	appendValue(string(component.Intent.ClassSource))
+	appendValue(string(component.Selection.State))
+	appendValue(component.Selection.Class)
+	appendValue(string(component.Selection.Reason.State))
+	appendValue(component.Selection.Reason.Digest)
+	appendValue(string(component.Class.State))
+	appendValue(component.Class.Name)
+	appendValue(string(component.Requests.BaseState))
+	// Counts frame the variable-length domains; individual string lengths
+	// alone cannot distinguish request tokens from state or issue tokens.
+	appendValue(strconv.Itoa(len(component.Requests.Base)))
+	for _, request := range component.Requests.Base {
+		appendValue(request.Name)
+		appendValue(request.Quantity)
+	}
+	appendValue(string(component.Requests.EffectiveState))
+	appendValue(strconv.Itoa(len(component.Requests.Effective)))
+	for _, request := range component.Requests.Effective {
+		appendValue(request.Name)
+		appendValue(request.Quantity)
+	}
+	appendValue(strconv.Itoa(len(component.Issues)))
+	for _, issue := range component.Issues {
+		appendValue(string(issue))
+	}
+	return key.String()
 }
 
 func selectionEvidence(state AcceleratorSelectionState) string {
