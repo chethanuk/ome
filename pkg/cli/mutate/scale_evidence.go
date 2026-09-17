@@ -53,7 +53,7 @@ func InspectScaleEvidence(parent *v1beta1.InferenceService, replica *v1beta1.Inf
 		scale.Spec.Replicas != *replica.Spec.Replicas || scale.Status.Replicas != replica.Status.Replicas {
 		return ScaleEvidence{}, ErrScaleEvidence
 	}
-	if row.active || scaleLifecycleWork(replica) {
+	if row.active || scaleLifecycleWork(row.logicalReplica) {
 		return ScaleEvidence{}, ErrScaleWork
 	}
 	return ScaleEvidence{parent: parent.DeepCopy(), replica: replica.DeepCopy(), source: source, replicas: map[v1beta1.ComponentType]*v1beta1.InferenceReplica{replica.Spec.Component: replica.DeepCopy()}}, nil

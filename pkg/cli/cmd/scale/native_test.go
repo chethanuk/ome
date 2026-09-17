@@ -34,6 +34,7 @@ import (
 	reportv1alpha1 "sigs.k8s.io/ome/pkg/cli/report/v1alpha1"
 	"sigs.k8s.io/ome/pkg/client/clientset/versioned"
 	"sigs.k8s.io/ome/pkg/constants"
+	"sigs.k8s.io/ome/pkg/controller/v1beta1/irstatus"
 	"sigs.k8s.io/ome/pkg/rolloutpolicy"
 	"sigs.k8s.io/yaml"
 )
@@ -72,6 +73,78 @@ func nativeFixture() *nativeAPI {
 	s := &autoscalingv1.Scale{TypeMeta: metav1.TypeMeta{APIVersion: "autoscaling/v1", Kind: "Scale"}, ObjectMeta: metav1.ObjectMeta{Name: r.Name, Namespace: r.Namespace, UID: r.UID, ResourceVersion: r.ResourceVersion}, Spec: autoscalingv1.ScaleSpec{Replicas: 1}, Status: autoscalingv1.ScaleStatus{Replicas: 1, Selector: privateSentinel}}
 	r.Spec.Runners = []v1beta1.Runner{{Name: "default", Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:1.36", Env: []corev1.EnvVar{{Name: "SYNTHETIC_SECRET", Value: privateSentinel}}}}}}}}
 	return &nativeAPI{parent: p, runtime: rt, replica: r, scale: s}
+}
+
+func storeNativeColumnar(t *testing.T, replica *v1beta1.InferenceReplica) {
+	t.Helper()
+	columns, err := irstatus.EncodeColumns(replica.Status.InstanceStatuses, 2048)
+	require.NoError(t, err)
+	encoding := v1beta1.InstanceStatusEncodingColumnarV2
+	replica.Status.InstanceStatuses = nil
+	replica.Status.InstanceStatusEncoding = &encoding
+	replica.Status.InstanceStatusColumns = columns
+}
+
+func TestScaleNativeColumnarLifecycleRefusesWithoutPatch(t *testing.T) {
+	api := nativeFixture()
+	api.replica.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceDeleting
+	storeNativeColumnar(t, api.replica)
+
+	out, stderr, err, _ := runNativeCommand(t, api, []string{"chat", "--component=engine", "--replicas=3", "--override-autoscaler", "--yes", "-o=json"})
+	require.Error(t, err)
+	require.Empty(t, out)
+	require.Zero(t, api.patches)
+	require.NotContains(t, stderr+err.Error(), privateSentinel)
+	t.Logf("columnar active-work refusal (exit error %q):\n%s", err.Error(), stderr)
+}
+
+func TestScaleNativeColumnarInvalidOrTransientStatusNeverPatches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*v1beta1.InferenceReplica)
+	}{
+		{name: "malformed columns", edit: func(ir *v1beta1.InferenceReplica) {
+			ir.Status.InstanceStatusColumns.Members = "0-1"
+		}},
+		{name: "unsupported encoding", edit: func(ir *v1beta1.InferenceReplica) {
+			encoding := v1beta1.InstanceStatusEncoding("private-next-version")
+			ir.Status.InstanceStatusEncoding = &encoding
+		}},
+		{name: "over row limit", edit: func(ir *v1beta1.InferenceReplica) {
+			ir.Status.InstanceStatusColumns.Members = "0-2048"
+			ir.Status.InstanceStatusColumns.Phases[0].Indexes = "0-2048"
+		}},
+		{name: "transient without operation", edit: func(ir *v1beta1.InferenceReplica) {
+			ir.Status.InstanceStatusColumns.Phases[0].Value = v1beta1.OMENativeInstanceUpdating
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := nativeFixture()
+			storeNativeColumnar(t, api.replica)
+			tc.edit(api.replica)
+			stored := api.replica.DeepCopy()
+			out, stderr, err, _ := runNativeCommand(t, api, []string{"chat", "--component=engine", "--replicas=3", "--override-autoscaler", "--yes", "-o=json"})
+			require.Error(t, err)
+			require.Empty(t, out)
+			require.Zero(t, api.patches)
+			require.Equal(t, stored, api.replica)
+			require.NotContains(t, stderr+err.Error(), privateSentinel)
+			require.NotContains(t, stderr+err.Error(), "private-next-version")
+		})
+	}
+}
+
+func TestScaleNativeColumnarIdleUsesGuardedPatch(t *testing.T) {
+	api := nativeFixture()
+	storeNativeColumnar(t, api.replica)
+
+	out, stderr, err, _ := runNativeCommand(t, api, []string{"chat", "--component=engine", "--replicas=3", "--override-autoscaler", "--yes", "-o=json"})
+	require.NoError(t, err)
+	require.Equal(t, 1, api.patches)
+	require.Contains(t, out, `"accepted": true`)
+	require.Contains(t, stderr, "ALPHA guarded scale preview")
+	require.NotContains(t, out+stderr, privateSentinel)
+	t.Logf("columnar idle guarded scale stderr:\n%s\nstdout:\n%s", stderr, out)
 }
 
 func completedNativeFixture(t *testing.T) *nativeAPI {
