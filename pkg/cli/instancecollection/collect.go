@@ -16,6 +16,7 @@ import (
 	omev1beta1 "sigs.k8s.io/ome/pkg/apis/ome/v1beta1"
 	"sigs.k8s.io/ome/pkg/cli/paging"
 	"sigs.k8s.io/ome/pkg/constants"
+	"sigs.k8s.io/ome/pkg/controller/v1beta1/irstatus"
 )
 
 var (
@@ -27,6 +28,7 @@ var (
 	ErrMaxStatusRowsInvalid              = errors.New("instance collection requires a positive status-row limit")
 	ErrMaxRetryBlocksInvalid             = errors.New("instance collection requires a non-negative retry-block limit")
 	ErrDetailLimitsInvalid               = errors.New("instance collection detail limits are invalid")
+	ErrStatusEncodingInvalid             = errors.New("instance collection status encoding is invalid")
 )
 
 const (
@@ -36,6 +38,10 @@ const (
 	maxRetryReasonBytes    = 4096
 	maxInstanceDetailBytes = 1024
 	maxInstanceBaseBytes   = 1024
+	// This absolute expansion cap can exceed a caller's output-row budget so
+	// unrelated evidence (for example retry blocks) remains available after
+	// validated ColumnarV2 rows are truncated. A caller cannot raise it.
+	maxDecodedStatusRows = 20000
 )
 
 type RejectionReason string
@@ -118,8 +124,18 @@ type RetryBlocksTruncation struct {
 	Component omev1beta1.ComponentType
 }
 
+// StatusEncoding preserves validated wire provenance separately from the
+// normalized dense rows returned to projection. It never contains raw columns.
+type StatusEncoding struct {
+	Name      string
+	Component omev1beta1.ComponentType
+	UID       types.UID
+	Encoding  irstatus.Encoding
+}
+
 type Result struct {
 	Items                []omev1beta1.InferenceReplica
+	StatusEncodings      []StatusEncoding
 	Rejected             []Rejection
 	StatusRowsTruncated  []StatusRowsTruncation
 	RetryBlocksTruncated []RetryBlocksTruncation
@@ -195,6 +211,7 @@ func CollectRelated(
 
 	result := Result{
 		Items:                make([]omev1beta1.InferenceReplica, 0, len(listed.Items)),
+		StatusEncodings:      make([]StatusEncoding, 0, len(listed.Items)),
 		Rejected:             make([]Rejection, 0),
 		StatusRowsTruncated:  make([]StatusRowsTruncation, 0),
 		RetryBlocksTruncated: make([]RetryBlocksTruncation, 0),
@@ -229,8 +246,18 @@ func CollectRelated(
 	})
 	remainingRows := limits.MaxStatusRows
 	remainingRetryBlocks := limits.MaxRetryBlocks
+	decoder := irstatus.NewDecoder(maxDecodedStatusRows)
 	for _, item := range accepted {
-		copyRows := len(item.Status.InstanceStatuses) <= remainingRows
+		// Decode only accepted sources on a private shallow copy. The decoder
+		// replaces the representation fields without mutating their payloads.
+		// Validate before applying the smaller aggregate output budget so a
+		// malformed source cannot be mistaken for ordinary truncation.
+		normalized := *item
+		encoding, decodeErr := decoder.Decode(&normalized)
+		if decodeErr != nil {
+			return result, ErrStatusEncodingInvalid
+		}
+		copyRows := len(normalized.Status.InstanceStatuses) <= remainingRows
 		if !copyRows {
 			result.StatusRowsTruncated = append(result.StatusRowsTruncated, StatusRowsTruncation{
 				Name: item.Name, Component: item.Spec.Component,
@@ -242,12 +269,15 @@ func CollectRelated(
 				Name: item.Name, Component: item.Spec.Component,
 			})
 		}
-		copied, truncations, malformed := boundedReplicaCopy(item, isvc, copyRows, copyRetryBlocks, limits.Details)
+		copied, truncations, malformed := boundedReplicaCopy(&normalized, isvc, copyRows, copyRetryBlocks, limits.Details)
 		result.Items = append(result.Items, copied)
+		result.StatusEncodings = append(result.StatusEncodings, StatusEncoding{
+			Name: item.Name, Component: item.Spec.Component, UID: item.UID, Encoding: encoding,
+		})
 		result.DetailsTruncated = append(result.DetailsTruncated, truncations...)
 		result.DetailsMalformed = append(result.DetailsMalformed, malformed...)
 		if copyRows {
-			remainingRows -= len(item.Status.InstanceStatuses)
+			remainingRows -= len(normalized.Status.InstanceStatuses)
 		}
 		if copyRetryBlocks {
 			remainingRetryBlocks -= len(item.Status.RetryBlocks)
