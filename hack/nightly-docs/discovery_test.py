@@ -55,7 +55,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(selected), 100)
         self.assertEqual(len(deferred), 60)
         self.assertEqual([item['concern'] for item in selected[:8]], [f'concern-{n}-0' for n in range(8)])
-        self.assertTrue(all(reason == '100-PR cap' for _, reason in deferred))
+        self.assertTrue(all(reason == 'PR cap' for _, reason in deferred))
 
     def test_overlap_and_semantic_identity_are_deferred_not_failed(self):
         for scan in self.scans[:3]:
@@ -66,6 +66,17 @@ class DiscoveryTests(unittest.TestCase):
         selected, deferred = self.combine()
         self.assertEqual(len(selected), 1)
         self.assertEqual([reason for _, reason in deferred], ['duplicate concern', 'overlapping documentation files'])
+
+    def test_queue_matches_full_identity_not_shared_concern_slug(self):
+        """Only the deferred area is queued when two areas share a slug."""
+        first = proposal(area='cli', concern='timeout-default')
+        second = proposal(area='rollouts', concern='timeout-default', question='Other timeout')
+        self.scans[0].update(inspected_commits=['a' * 40], concerns=[first])
+        self.scans[1].update(inspected_commits=['a' * 40], concerns=[second])
+        selected, deferred = self.combine()
+        self.assertEqual([item['area'] for item in selected], ['cli'])
+        queued = discovery.deferred_queue(self.scans, deferred, [])
+        self.assertEqual([item['key'] for item in queued], [docs.validate_item(second)['key']])
 
     def test_covered_proposal_does_not_reserve_other_files(self):
         from nightly_docs_test import pr
