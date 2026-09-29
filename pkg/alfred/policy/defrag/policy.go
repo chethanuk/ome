@@ -69,6 +69,27 @@ type evalCtx struct {
 	executionOpen bool
 }
 
+// newEvalContext fixes the scoring baseline shared by candidate selection and
+// actual-placement revalidation. Callers may reuse precomputed pool demand.
+func newEvalContext(snap *snapshot.ClusterSnapshot, cfg *config.Config, pool string,
+	ladder []int64, prior map[int64]float64, demandGPUs map[int64]int64) *evalCtx {
+	ctx := &evalCtx{
+		snap:       snap,
+		cfg:        cfg,
+		pool:       pool,
+		bins:       schedulableBins(snap, cfg, pool),
+		ladder:     ladder,
+		weights:    demandWeights(ladder, demandGPUs, prior, *cfg.Policies.Defragmentation.Scoring.DemandBlendLambda),
+		pendings:   poolPendings(snap, pool),
+		costWeight: costWeight(cfg.Policies.Defragmentation.Aggressiveness),
+	}
+	for _, bin := range ctx.bins {
+		ctx.totalFree += bin.free
+	}
+	ctx.before = weightedFrag(ctx.bins, ctx.ladder, ctx.weights, ctx.totalFree)
+	return ctx
+}
+
 // Evaluate turns the snapshot into a ranked []Candidate. Gate → enumerate → classify → simulate → score →
 // boost → rank → filter.
 func (*Policy) Evaluate(snap *snapshot.ClusterSnapshot, cfg *config.Config) []policy.Candidate {
@@ -81,9 +102,7 @@ func (*Policy) Evaluate(snap *snapshot.ClusterSnapshot, cfg *config.Config) []po
 
 	ladder := int64Ladder(d.Scoring.SizeLadder)
 	prior := parsePrior(d.Scoring.SizePrior)
-	lambda := *d.Scoring.DemandBlendLambda
 	demand := demandByPoolAndSize(snap, ladder)
-	weight := costWeight(d.Aggressiveness)
 	now := snap.Timestamp
 
 	var out []policy.Candidate
@@ -97,19 +116,8 @@ func (*Policy) Evaluate(snap *snapshot.ClusterSnapshot, cfg *config.Config) []po
 		if !executionOpen && !advisoryOpen {
 			continue
 		}
-		ctx := &evalCtx{
-			snap:          snap,
-			cfg:           cfg,
-			pool:          pool,
-			bins:          schedulableBins(snap, cfg, pool),
-			ladder:        ladder,
-			weights:       demandWeights(ladder, demand[pool], prior, lambda),
-			totalFree:     cs.TotalFree,
-			pendings:      poolPendings(snap, pool),
-			costWeight:    weight,
-			executionOpen: executionOpen,
-		}
-		ctx.before = weightedFrag(ctx.bins, ladder, ctx.weights, ctx.totalFree)
+		ctx := newEvalContext(snap, cfg, pool, ladder, prior, demand[pool])
+		ctx.executionOpen = executionOpen
 
 		for _, w := range sortedWorkloads(snap) {
 			for _, comp := range sortedComponents(w) {
@@ -248,9 +256,7 @@ func evaluateInstance(ctx *evalCtx, w *snapshot.Workload, comp *snapshot.Compone
 		return policy.Candidate{}, false
 	}
 
-	benefit := ctx.before - weightedFrag(after, ctx.ladder, ctx.weights, ctx.totalFree)
-	cost := costOMENativeSurge
-	score := benefit - ctx.costWeight*cost
+	benefit, cost, score, emergency := scorePlacement(ctx, w, from, after)
 	if score <= 0 {
 		c := advisory(w, comp, inst.Index,
 			policy.AdvisoryNonExecutableObservedFragmentation, from, 0)
@@ -259,16 +265,6 @@ func evaluateInstance(ctx *evalCtx, w *snapshot.Workload, comp *snapshot.Compone
 		c.Cost = cost
 		c.Score = score
 		return c, true
-	}
-
-	emergency := unblocksOverAgePending(ctx, w, after)
-	if emergency {
-		score *= emergencyBoostFactor
-	}
-	if spotPrefersSource(w, ctx.cfg) {
-		if node := ctx.snap.Nodes[from]; node != nil && node.Preemptible {
-			score *= spotSourceBoostFactor
-		}
 	}
 
 	return policy.Candidate{
@@ -289,6 +285,25 @@ func evaluateInstance(ctx *evalCtx, w *snapshot.Workload, comp *snapshot.Compone
 		Score:                score,
 		Emergency:            emergency,
 	}, true
+}
+
+func scorePlacement(ctx *evalCtx, w *snapshot.Workload, from string, after []binState) (benefit, cost, score float64, emergency bool) {
+	benefit = ctx.before - weightedFrag(after, ctx.ladder, ctx.weights, ctx.totalFree)
+	cost = costOMENativeSurge
+	score = benefit - ctx.costWeight*cost
+	if score <= 0 {
+		return
+	}
+	emergency = unblocksOverAgePending(ctx, w, after)
+	if emergency {
+		score *= emergencyBoostFactor
+	}
+	if spotPrefersSource(w, ctx.cfg) {
+		if node := ctx.snap.Nodes[from]; node != nil && node.Preemptible {
+			score *= spotSourceBoostFactor
+		}
+	}
+	return
 }
 
 // unblocksOverAgePending reports whether the simulated after-state seats a
