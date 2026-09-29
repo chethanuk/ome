@@ -13,6 +13,13 @@ recommendations or dispatches migration requests. Before dispatch, Alfred uses
 an isolated scheduler worker with an explicitly configured Kubernetes or OME
 scheduler profile, then rechecks the source and cluster state.
 
+For the bundled, pinned scheduler profiles, Namespace annotation-only updates do
+not invalidate that final scheduling-state check. Namespace names, UIDs, labels,
+lifecycle, membership and unknown fields still do, as do annotations on Pods,
+Nodes and PodGroups. Raw simulation inputs remain unchanged. This is a narrow
+noise filter, not progress under arbitrary cluster churn or a guarantee for
+operator-supplied simulator binaries.
+
 - [`main.go`](main.go): process setup, configuration, workers and leader election.
 - [`pkg/alfred`](../../pkg/alfred): snapshots, policies, guards, dispatch journal,
   reporting and metrics.
@@ -64,9 +71,11 @@ event stamps, previous-failure diagnostics and condition messages do not.
 
 Pre-upgrade prepared requests retain their original strict fingerprint: Alfred
 never rewrites their fence to authorize a retry. Unknown fingerprint versions
-cannot be retried, but already published requests still reconcile. A pause that
-outlasts the acknowledgement deadline can leave a request stalled; this change
-does not resume stalled requests. The pre-dispatch checks do not provide an atomic
+cannot be retried, but already published requests still reconcile. `SourceChanged`
+also covers unknown or malformed stored fingerprints, so it does not always mean
+the live source changed. A pause that outlasts the acknowledgement deadline can
+leave a request stalled; this change does not resume stalled requests. The
+pre-dispatch checks do not provide an atomic
 transaction across owner and replica objects, fence future consumer acceptance,
 or reserve a destination. Typed source fingerprints cover fields known to the
 running Alfred binary, not unknown fields from a newer API version.
