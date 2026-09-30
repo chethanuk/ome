@@ -7,7 +7,7 @@ import (
 	"sigs.k8s.io/ome/pkg/constants"
 )
 
-// InferenceServiceSpec is the top level type for this resource
+// InferenceServiceSpec is the desired state of an InferenceService.
 // +kubebuilder:validation:XValidation:rule="!(has(self.routing) && has(self.routing.capacityFactors) && has(self.placement) && has(self.placement.capacityFactors))",message="spec.routing.capacityFactors and deprecated spec.placement.capacityFactors must not both be set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.placement) || !has(oldSelf.placement.policy) || oldSelf.placement.policy != 'ClusterAffinity' || (has(self.placement) && has(self.placement.policy) && self.placement.policy == 'ClusterAffinity')",message="ClusterAffinity placement policy cannot be removed; drain and recreate the service to use Legacy"
 type InferenceServiceSpec struct {
@@ -32,9 +32,10 @@ type InferenceServiceSpec struct {
 	// VirtualDeployment is legacy; neither is accepted here.
 	// +kubebuilder:validation:Enum=OMENative;RawDeployment
 	// +optional
+	// +ome:since=v1.3
 	DeploymentMode *constants.DeploymentModeType `json:"deploymentMode,omitempty"`
 
-	// Engine defines the serving engine spec
+	// Engine defines the serving engine spec.
 	// This provides detailed container and pod specifications for model serving.
 	// It allows defining the model runner (container spec), as well as complete pod specifications
 	// including init containers, sidecar containers, and other pod-level configurations.
@@ -42,7 +43,7 @@ type InferenceServiceSpec struct {
 	// +optional
 	Engine *EngineSpec `json:"engine,omitempty"`
 
-	// Decoder defines the decoder spec
+	// Decoder defines the decoder spec.
 	// This is specifically used for PD (Prefill-Decode) disaggregated serving deployments.
 	// Similar to Engine in structure, it allows for container and pod specifications,
 	// but is only utilized when implementing the disaggregated serving pattern
@@ -74,6 +75,7 @@ type InferenceServiceSpec struct {
 	// HTTPRoutes OME emits for this InferenceService. See the
 	// TrafficSpec doc for details.
 	// +optional
+	// +ome:since=v1.3
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
 
 	// Rollout is the single home for rollout configuration on this
@@ -81,6 +83,7 @@ type InferenceServiceSpec struct {
 	// its progression (canary | blueGreen | rollingUpdate). Sequencing is the
 	// group list order; a group's Components roll together.
 	// +optional
+	// +ome:since=v1.3
 	Rollout *RolloutSpec `json:"rollout,omitempty"`
 
 	// ScalingPolicy coordinates replica counts across Components when more
@@ -89,6 +92,7 @@ type InferenceServiceSpec struct {
 	// every Component autoscales independently. Alpha. The API
 	// may change without notice.
 	// +optional
+	// +ome:since=v1.3
 	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 
 	// Placement declares how the multi-cluster control plane selects and orders
@@ -98,6 +102,7 @@ type InferenceServiceSpec struct {
 	// consulted on the control-plane cluster; ignored in single-cluster
 	// deployments. Alpha; the API may change without notice.
 	// +optional
+	// +ome:since=v1.3
 	Placement *PlacementSpec `json:"placement,omitempty"`
 
 	// Routing configures cross-cluster traffic distribution for this
@@ -105,6 +110,7 @@ type InferenceServiceSpec struct {
 	// configuration. Only consulted on the control-plane cluster; ignored in
 	// single-cluster deployments. Alpha; the API may change without notice.
 	// +optional
+	// +ome:since=v1.3
 	Routing *RoutingSpec `json:"routing,omitempty"`
 }
 
@@ -154,8 +160,8 @@ func (s *InferenceServiceSpec) GetCanaryGroup() *RolloutGroup {
 
 // AcceleratorSelector defines how to select accelerators for the InferenceService
 type AcceleratorSelector struct {
-	// AcceleratorClass explicitly selects a specific AcceleratorClass
-	// Takes precedence over other selectors
+	// AcceleratorClass explicitly selects a specific AcceleratorClass.
+	// Takes precedence over other selectors.
 	// +optional
 	AcceleratorClass *string `json:"acceleratorClass,omitempty"`
 
@@ -197,14 +203,14 @@ type AcceleratorConstraints struct {
 	// +listType=atomic
 	ExcludedClasses []string `json:"excludedClasses,omitempty"`
 
-	// ArchitectureFamilies limits selection to specific families
-	// Examples: ["nvidia-hopper", "nvidia-ampere"]
+	// ArchitectureFamilies limits selection to specific families.
+	// Examples: ["nvidia-hopper", "nvidia-ampere"].
 	// +optional
 	// +listType=atomic
 	ArchitectureFamilies []string `json:"architectureFamilies,omitempty"`
 
-	// PreferredPrecisions lists numeric precisions in order of preference
-	// Examples: ["fp8", "fp16", "fp32"]
+	// PreferredPrecisions lists numeric precisions in order of preference.
+	// Examples: ["fp8", "fp16", "fp32"].
 	// +optional
 	// +listType=atomic
 	PreferredPrecisions []string `json:"preferredPrecisions,omitempty"`
@@ -227,13 +233,13 @@ const (
 	FirstAvailablePolicy AcceleratorSelectionPolicy = "FirstAvailable"
 )
 
-// EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments)
+// EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments).
 // Provides a comprehensive specification for deploying model serving containers and pods.
 // It allows for complete Kubernetes pod configuration including main containers,
 // init containers, sidecars, volumes, and other pod-level settings.
 // For distributed deployments, it supports leader-worker architecture configuration.
 type EngineSpec struct {
-	// This spec provides a full PodSpec for the engine component
+	// This spec provides a full PodSpec for the engine component.
 	// Allows complete customization of the Kubernetes Pod configuration including
 	// containers, volumes, security contexts, affinity rules, and other pod settings.
 	// +optional
@@ -243,20 +249,20 @@ type EngineSpec struct {
 	// Controls scaling behavior and resource allocation for the engine component.
 	ComponentExtensionSpec `json:",inline"`
 
-	// Runner container override for customizing the engine container
-	// This is essentially a container spec that can override the default container
+	// Runner container override for customizing the engine container.
+	// This is essentially a container spec that can override the default container.
 	// Defines the main model runner container configuration, including image,
 	// resource requests/limits, environment variables, and command.
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
 
-	// Leader node configuration (only used for multi-node deployment)
+	// Leader node configuration (only used for multi-node deployment).
 	// Defines the pod and container spec for the leader node that coordinates
 	// distributed inference in multi-node deployments.
 	// +optional
 	Leader *LeaderSpec `json:"leader,omitempty"`
 
-	// Worker nodes configuration (only used for multi-node deployment)
+	// Worker nodes configuration (only used for multi-node deployment).
 	// Defines the pod and container spec for worker nodes that perform
 	// distributed processing tasks as directed by the leader.
 	// +optional
@@ -272,6 +278,7 @@ type EngineSpec struct {
 	// ignored for single-pod (no leader to anchor to). Unset means no
 	// auto-generated gang affinity.
 	// +optional
+	// +ome:since=v1.3
 	TopologyKey *string `json:"topologyKey,omitempty"`
 
 	// TopologySpread spreads this component's instances across fault
@@ -290,6 +297,7 @@ type EngineSpec struct {
 	// fleet. Unset keeps pure bin-packing.
 	// +optional
 	// +kubebuilder:validation:Enum=Preferred;Required
+	// +ome:since=v1.3
 	TopologySpread *TopologySpreadPolicy `json:"topologySpread,omitempty"`
 
 	// TopologySpreadKey is the node-label key naming the fault domains
@@ -301,6 +309,7 @@ type EngineSpec struct {
 	// components have no co-location key, so spreading them requires
 	// setting this explicitly. Ignored unless TopologySpread is set.
 	// +optional
+	// +ome:since=v1.3
 	TopologySpreadKey *string `json:"topologySpreadKey,omitempty"`
 
 	// AcceleratorOverride allows overriding the global accelerator selection for this component
@@ -324,12 +333,12 @@ const (
 	TopologySpreadRequired TopologySpreadPolicy = "Required"
 )
 
-// DecoderSpec defines the configuration for the Decoder component (token generation in PD-disaggregated deployment)
+// DecoderSpec defines the configuration for the Decoder component (token generation in PD-disaggregated deployment).
 // Used specifically for prefill-decode disaggregated deployments to handle the token generation phase.
 // Similar to EngineSpec in structure, it allows for detailed pod and container configuration,
 // but is specifically used for the decode phase when separating prefill and decode processes.
 type DecoderSpec struct {
-	// This spec provides a full PodSpec for the decoder component
+	// This spec provides a full PodSpec for the decoder component.
 	// Allows complete customization of the Kubernetes Pod configuration including
 	// containers, volumes, security contexts, affinity rules, and other pod settings.
 	// +optional
@@ -339,20 +348,20 @@ type DecoderSpec struct {
 	// Controls scaling behavior and resource allocation for the decoder component.
 	ComponentExtensionSpec `json:",inline"`
 
-	// Runner container override for customizing the main container
-	// This is essentially a container spec that can override the default container
+	// Runner container override for customizing the main container.
+	// This is essentially a container spec that can override the default container.
 	// Defines the main decoder container configuration, including image,
 	// resource requests/limits, environment variables, and command.
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
 
-	// Leader node configuration (only used for multi-node deployment)
+	// Leader node configuration (only used for multi-node deployment).
 	// Defines the pod and container spec for the leader node that coordinates
 	// distributed token generation in multi-node deployments.
 	// +optional
 	Leader *LeaderSpec `json:"leader,omitempty"`
 
-	// Worker nodes configuration (only used for multi-node deployment)
+	// Worker nodes configuration (only used for multi-node deployment).
 	// Defines the pod and container spec for worker nodes that perform
 	// distributed token generation tasks as directed by the leader.
 	// +optional
@@ -368,6 +377,7 @@ type DecoderSpec struct {
 	// ignored for single-pod (no leader to anchor to). Unset means no
 	// auto-generated gang affinity.
 	// +optional
+	// +ome:since=v1.3
 	TopologyKey *string `json:"topologyKey,omitempty"`
 
 	// TopologySpread spreads this component's instances across fault
@@ -386,6 +396,7 @@ type DecoderSpec struct {
 	// fleet. Unset keeps pure bin-packing.
 	// +optional
 	// +kubebuilder:validation:Enum=Preferred;Required
+	// +ome:since=v1.3
 	TopologySpread *TopologySpreadPolicy `json:"topologySpread,omitempty"`
 
 	// TopologySpreadKey is the node-label key naming the fault domains
@@ -397,6 +408,7 @@ type DecoderSpec struct {
 	// components have no co-location key, so spreading them requires
 	// setting this explicitly. Ignored unless TopologySpread is set.
 	// +optional
+	// +ome:since=v1.3
 	TopologySpreadKey *string `json:"topologySpreadKey,omitempty"`
 
 	// AcceleratorOverride allows overriding the global accelerator selection for this component
@@ -404,28 +416,28 @@ type DecoderSpec struct {
 	AcceleratorOverride *AcceleratorSelector `json:"acceleratorOverride,omitempty"`
 }
 
-// LeaderSpec defines the configuration for a leader node in a multi-node component
+// LeaderSpec defines the configuration for a leader node in a multi-node component.
 // The leader node coordinates the activities of worker nodes in distributed inference or
 // token generation setups, handling task distribution and result aggregation.
 type LeaderSpec struct {
-	// Pod specification for the leader node
-	// This overrides the main PodSpec when specified
+	// Pod specification for the leader node.
+	// This overrides the main PodSpec when specified.
 	// Allows customization of the Kubernetes Pod configuration specifically for the leader node.
 	// +optional
 	PodSpec `json:",inline"`
 
-	// Runner container override for customizing the main container
-	// This is essentially a container spec that can override the default container
+	// Runner container override for customizing the main container.
+	// This is essentially a container spec that can override the default container.
 	// Provides fine-grained control over the container that executes the leader node's coordination logic.
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
 }
 
-// WorkerSpec defines the configuration for worker nodes in a multi-node component
+// WorkerSpec defines the configuration for worker nodes in a multi-node component.
 // Worker nodes perform the distributed processing tasks assigned by the leader node,
 // enabling horizontal scaling for compute-intensive workloads.
 type WorkerSpec struct {
-	// PodSpec for the worker
+	// PodSpec for the worker.
 	// Allows customization of the Kubernetes Pod configuration specifically for worker nodes.
 	// +optional
 	PodSpec `json:",inline"`
@@ -437,8 +449,8 @@ type WorkerSpec struct {
 	// +optional
 	Size *int `json:"size,omitempty"`
 
-	// Runner container override for customizing the main container
-	// This is essentially a container spec that can override the default container
+	// Runner container override for customizing the main container.
+	// This is essentially a container spec that can override the default container.
 	// Provides fine-grained control over the container that executes the worker node's processing logic.
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
@@ -456,40 +468,37 @@ type RouterSpec struct {
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
 
-	// Additional configuration parameters for the runner
-	// This can include framework-specific settings
+	// Additional configuration parameters for the runner.
+	// This can include framework-specific settings.
 	// +optional
 	Config map[string]string `json:"config,omitempty"`
 }
 
-// RunnerSpec defines container configuration plus additional config settings
+// RunnerSpec defines container configuration plus additional config settings.
 // The Runner is the primary container that executes the model serving or token generation logic.
 type RunnerSpec struct {
-	// Container spec for the runner
+	// Container spec for the runner.
 	// Provides complete Kubernetes container configuration for the primary execution container.
 	// +optional
 	v1.Container `json:",inline"`
 }
 
 type ModelRef struct {
-	// Name of the model being referenced
+	// Name of the model being referenced.
 	// Identifies the specific model to be used for inference.
 	Name string `json:"name"`
 
-	// Kind of the model being referenced
-	// Defaults to ClusterBaseModel
+	// Kind of the model being referenced.
 	// Specifies the Kubernetes resource kind of the referenced model.
 	// +kubebuilder:default="ClusterBaseModel"
 	Kind *string `json:"kind,omitempty"`
 
-	// APIGroup of the resource being referenced
-	// Defaults to `ome.io`
+	// APIGroup of the resource being referenced.
 	// Specifies the Kubernetes API group of the referenced model.
 	// +kubebuilder:default="ome.io"
 	APIGroup *string `json:"apiGroup,omitempty"`
 
-	// Optional FineTunedWeights references
-	// References to fine-tuned weights that should be applied to the base model.
+	// FineTunedWeights names the FineTunedWeight resources to apply to the base model.
 	// +optional
 	// +listType=atomic
 	FineTunedWeights []string `json:"fineTunedWeights,omitempty"`
@@ -503,6 +512,7 @@ type ModelRef struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +ome:since=v1.3
 	Overlays []ModelOverlayRef `json:"overlays,omitempty"`
 }
 
@@ -519,19 +529,17 @@ type ModelOverlayRef struct {
 }
 
 type ServingRuntimeRef struct {
-	// Name of the runtime being referenced
+	// Name of the runtime being referenced.
 	// Identifies the specific runtime environment to be used for model execution.
 	Name string `json:"name"`
 
-	// Kind of the runtime being referenced
-	// Defaults to ClusterServingRuntime
+	// Kind of the runtime being referenced.
 	// Specifies the Kubernetes resource kind of the referenced runtime.
 	// ClusterServingRuntime is a cluster-wide runtime, while ServingRuntime is namespace-scoped.
 	// +kubebuilder:default="ClusterServingRuntime"
 	Kind *string `json:"kind,omitempty"`
 
-	// APIGroup of the resource being referenced
-	// Defaults to `ome.io`
+	// APIGroup of the resource being referenced.
 	// Specifies the Kubernetes API group of the referenced runtime.
 	// +kubebuilder:default="ome.io"
 	APIGroup *string `json:"apiGroup,omitempty"`
@@ -550,7 +558,8 @@ type ServingRuntimeRef struct {
 	Revision *string `json:"revision,omitempty"`
 }
 
-// InferenceService is the Schema for the InferenceServices API
+// InferenceService ties a model to a serving runtime and declares the
+// engine, decoder and router components that OME turns into workloads.
 // +k8s:openapi-gen=true
 // +genclient
 // +kubebuilder:object:root=true
