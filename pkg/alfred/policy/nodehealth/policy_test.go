@@ -158,7 +158,7 @@ func TestMarkerRetainsUnresolvedOMEGPUOccupancy(t *testing.T) {
 	if len(marker.Workloads) != 0 {
 		t.Fatalf("unresolved occupant invented workload identity: %v", marker.Workloads)
 	}
-	if !marker.OMEGPUOccupantsPresent {
+	if !marker.OMEAcceleratorOccupantsPresent {
 		t.Fatal("unresolved OME GPU occupant was mistaken for an empty node")
 	}
 }
@@ -510,5 +510,61 @@ func TestCooldownAndMaintenanceDoNotSuppressHealthFinding(t *testing.T) {
 				t.Fatalf("health policy must leave cooldown to Arbiter at age %s: %+v", age, got)
 			}
 		})
+	}
+}
+
+func TestTPUInstanceOnFlaggedNodeIsReportedButNotExecutable(t *testing.T) {
+	tests := []struct {
+		name   string
+		flag   testutil.NodeOption
+		reason string
+	}{
+		{name: "unhealthy", flag: testutil.NodeUnhealthy(), reason: policy.ReasonNodeUnhealthy},
+		{name: "maintenance", flag: testutil.NodeMaintenance("cordoned"), reason: policy.ReasonNodeMaintenance},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := testutil.NewSnapshot().
+				WithNode("source", "", 0, tt.flag).
+				WithNode("target", "", 0).
+				WithMultiPodTPUInstance("prod/tpu", v1beta1.EngineComponent, constants.OMENative, 8, "source").
+				Build()
+			got := evaluate(t, snap, config.Default())
+			if len(got) != 2 {
+				t.Fatalf("Evaluate() = %+v, want a marker and one finding", got)
+			}
+			marker := got[0].Remediation
+			if marker == nil || !reflect.DeepEqual(marker.Workloads, []string{"prod/tpu"}) ||
+				!marker.OMEAcceleratorOccupantsPresent {
+				t.Fatalf("marker = %+v, want the TPU workload as an occupant", marker)
+			}
+			finding := got[1]
+			if finding.Remediation != nil || finding.Executable || finding.Reason != tt.reason ||
+				finding.Workload.String() != "prod/tpu" || finding.Instance != 0 ||
+				finding.FromNode != "source" || finding.FootprintGPUs != 0 ||
+				finding.AdvisoryReason != policy.AdvisoryAcceleratorPlacementUnmodeled {
+				t.Fatalf("finding = %+v, want a non-executable TPU evacuation finding", finding)
+			}
+		})
+	}
+}
+
+func TestMixedGPUAndTPUInstanceIsNotExecutable(t *testing.T) {
+	snap := testutil.NewSnapshot().
+		WithNode("source", "h100", 8, testutil.NodeUnhealthy()).
+		WithNode("target", "h100", 8).
+		WithInstance("prod/mixed", v1beta1.EngineComponent, constants.OMENative, "source", 1).
+		Build()
+	// Surge planning places only the GPU footprint; the TPU chips must keep
+	// the finding advisory even though the GPUs alone would fit.
+	inst := snap.Workloads[types.NamespacedName{Namespace: "prod", Name: "mixed"}].
+		Components[v1beta1.EngineComponent].Instances[0]
+	inst.TotalTPUs = 8
+	inst.Pods[0].TPUs = 8
+
+	got := findings(evaluate(t, snap, config.Default()))
+	if len(got) != 1 || got[0].Executable ||
+		got[0].AdvisoryReason != policy.AdvisoryAcceleratorPlacementUnmodeled {
+		t.Fatalf("findings = %+v, want one non-executable %s finding", got, policy.AdvisoryAcceleratorPlacementUnmodeled)
 	}
 }
